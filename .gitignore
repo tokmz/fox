@@ -1,0 +1,28 @@
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build
+/fox
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test
+*.out
+*.test
+coverage.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+runtime/logs/
