@@ -4,7 +4,7 @@ go 1.25.3
 
 require (
 	github.com/stretchr/testify v1.11.1
-	github.com/tokmz/qi v1.1.5
+	github.com/tokmz/qi v1.1.7
 	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.48.0
 	gorm.io/gorm v1.31.1

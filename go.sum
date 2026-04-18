@@ -135,8 +135,8 @@ github.com/sv-tools/openapi v0.2.1 h1:ES1tMQMJFGibWndMagvdoo34T1Vllxr1Nlm5wz6b1a
 github.com/sv-tools/openapi v0.2.1/go.mod h1:k5VuZamTw1HuiS9p2Wl5YIDWzYnHG6/FgPOSFXLAhGg=
 github.com/swaggo/swag/v2 v2.0.0-rc4 h1:SZ8cK68gcV6cslwrJMIOqPkJELRwq4gmjvk77MrvHvY=
 github.com/swaggo/swag/v2 v2.0.0-rc4/go.mod h1:Ow7Y8gF16BTCDn8YxZbyKn8FkMLRUHekv1kROJZpbvE=
-github.com/tokmz/qi v1.1.5 h1:UPdPVmvqcf44C8GOHjt7j3sRFLVdkPhTjt8Xgk6BNCw=
-github.com/tokmz/qi v1.1.5/go.mod h1:JElwPHCtw7kXQit+D5fxMz8EAwrOTAWKMiwXb9cRgMY=
+github.com/tokmz/qi v1.1.7 h1:KYSE2bfrvPw2Lbhni1vfXznMXEnu3Mny5UnvubGWrMM=
+github.com/tokmz/qi v1.1.7/go.mod h1:EscaHiOCF5iiXUsilBQB6OfvyuokZKclCqZf6grm0yY=
 github.com/twitchyliquid64/golang-asm v0.15.1 h1:SU5vSMR7hnwNxj24w34ZyCi/FmDZTkS4MhqMhdFk5YI=
 github.com/twitchyliquid64/golang-asm v0.15.1/go.mod h1:a1lVb/DtPvCB8fslRZhAngC2+aY1QWCk3Cedj/Gdt08=
 github.com/twmb/murmur3 v1.1.8 h1:8Yt9taO/WN3l08xErzjeschgZU2QSrwm1kclYq+0aRg=
