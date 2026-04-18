@@ -99,6 +99,7 @@ func (s *service) Create(ctx context.Context, req *CreateReq, operatorID int64) 
 		user.Password = hashPassword(req.Password)
 
 		if err := tx.Create(user).Error; err != nil {
+			s.logger.ErrorContext(ctx, "插入用户失败", zap.String("username", req.Username), zap.Error(err))
 			return errcode.ErrUserCreate.WithErr(err)
 		}
 
@@ -109,6 +110,7 @@ func (s *service) Create(ctx context.Context, req *CreateReq, operatorID int64) 
 				roleRecords = append(roleRecords, entity.SysUserRole{UserID: user.ID, RoleID: rid})
 			}
 			if err := tx.Create(&roleRecords).Error; err != nil {
+				s.logger.ErrorContext(ctx, "创建用户角色关联失败", zap.Int64("user_id", user.ID), zap.Error(err))
 				return errcode.ErrUserCreate.WithErr(err)
 			}
 		}
@@ -120,13 +122,14 @@ func (s *service) Create(ctx context.Context, req *CreateReq, operatorID int64) 
 				postRecords = append(postRecords, entity.SysUserPost{UserID: user.ID, PostID: pid})
 			}
 			if err := tx.Create(&postRecords).Error; err != nil {
+				s.logger.ErrorContext(ctx, "创建用户岗位关联失败", zap.Int64("user_id", user.ID), zap.Error(err))
 				return errcode.ErrUserCreate.WithErr(err)
 			}
 		}
 
 		return nil
 	}); err != nil {
-		s.logger.ErrorContext(ctx, "创建用户失败", zap.String("username", req.Username), zap.Error(err))
+		s.logger.ErrorContext(ctx, "创建用户事务失败", zap.String("username", req.Username), zap.Error(err))
 		return err
 	}
 
@@ -145,9 +148,11 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 	if err := s.db.WithContext(ctx).
 		Where("id IN ?", req.IDs).
 		Find(&users).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询待删除用户失败", zap.Any("ids", req.IDs), zap.Error(err))
 		return errcode.ErrUserQuery.WithErr(err)
 	}
 	if len(users) == 0 {
+		s.logger.WarnContext(ctx, "待删除用户不存在", zap.Any("ids", req.IDs))
 		return errcode.ErrUserNotFound
 	}
 
@@ -156,14 +161,16 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 		if err := tx.Model(&entity.SysUser{}).
 			Where("id IN ?", req.IDs).
 			Updates(map[string]any{"updated_by": operatorID}).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新用户操作人失败", zap.Any("ids", req.IDs), zap.Error(err))
 			return errcode.ErrUserDelete.WithErr(err)
 		}
 		if err := tx.Delete(&entity.SysUser{}, req.IDs).Error; err != nil {
+			s.logger.ErrorContext(ctx, "软删除用户失败", zap.Any("ids", req.IDs), zap.Error(err))
 			return errcode.ErrUserDelete.WithErr(err)
 		}
 		return nil
 	}); err != nil {
-		s.logger.ErrorContext(ctx, "批量删除用户失败",
+		s.logger.ErrorContext(ctx, "批量删除用户事务失败",
 			zap.Int("count", len(req.IDs)), zap.Error(err))
 		return err
 	}
@@ -178,8 +185,10 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 		var user entity.SysUser
 		if err := tx.First(&user, req.ID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
+				s.logger.WarnContext(ctx, "用户不存在", zap.Int64("id", req.ID))
 				return errcode.ErrUserNotFound
 			}
+			s.logger.ErrorContext(ctx, "查询用户失败", zap.Int64("id", req.ID), zap.Error(err))
 			return errcode.ErrUserQuery.WithErr(err)
 		}
 
@@ -188,9 +197,11 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			var count int64
 			if err := tx.Model(&entity.SysUser{}).
 				Where("username = ? AND id != ?", req.Username, req.ID).Count(&count).Error; err != nil {
+				s.logger.ErrorContext(ctx, "查询用户名失败", zap.String("username", req.Username), zap.Error(err))
 				return errcode.ErrUserQuery.WithErr(err)
 			}
 			if count > 0 {
+				s.logger.WarnContext(ctx, "用户名已存在", zap.String("username", req.Username))
 				return errcode.ErrUserExists.WithMessagef("用户名已存在: %s", req.Username)
 			}
 		}
@@ -226,11 +237,12 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 		}
 
 		if err := tx.Model(&user).Updates(updates).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新用户数据失败", zap.Int64("id", req.ID), zap.Error(err))
 			return errcode.ErrUserUpdate.WithErr(err)
 		}
 		return nil
 	}); err != nil {
-		s.logger.ErrorContext(ctx, "更新用户失败", zap.Int64("user_id", req.ID), zap.Error(err))
+		s.logger.ErrorContext(ctx, "更新用户事务失败", zap.Int64("user_id", req.ID), zap.Error(err))
 		return err
 	}
 
@@ -315,20 +327,24 @@ func (s *service) AssignRoles(ctx context.Context, req *AssignRolesReq, operator
 		// 存在性校验
 		var count int64
 		if err := tx.Model(&entity.SysUser{}).Where("id = ?", req.UserID).Count(&count).Error; err != nil {
+			s.logger.ErrorContext(ctx, "查询用户失败", zap.Int64("user_id", req.UserID), zap.Error(err))
 			return errcode.ErrUserQuery.WithErr(err)
 		}
 		if count == 0 {
+			s.logger.WarnContext(ctx, "用户不存在", zap.Int64("user_id", req.UserID))
 			return errcode.ErrUserNotFound
 		}
 
 		// 更新操作人
 		if err := tx.Model(&entity.SysUser{}).Where("id = ?", req.UserID).
 			Update("updated_by", operatorID).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新用户操作人失败", zap.Int64("user_id", req.UserID), zap.Error(err))
 			return errcode.ErrUserUpdate.WithErr(err)
 		}
 
 		// 清空旧关联
 		if err := tx.Where("user_id = ?", req.UserID).Delete(&entity.SysUserRole{}).Error; err != nil {
+			s.logger.ErrorContext(ctx, "删除旧角色关联失败", zap.Int64("user_id", req.UserID), zap.Error(err))
 			return errcode.ErrUserUpdate.WithErr(err)
 		}
 
@@ -339,6 +355,8 @@ func (s *service) AssignRoles(ctx context.Context, req *AssignRolesReq, operator
 				records = append(records, entity.SysUserRole{UserID: req.UserID, RoleID: rid})
 			}
 			if err := tx.Create(&records).Error; err != nil {
+				s.logger.ErrorContext(ctx, "创建新角色关联失败",
+					zap.Int64("user_id", req.UserID), zap.Int("count", len(req.RoleIDs)), zap.Error(err))
 				return errcode.ErrUserUpdate.WithErr(err)
 			}
 		}
@@ -361,20 +379,24 @@ func (s *service) AssignPosts(ctx context.Context, req *AssignPostsReq, operator
 		// 存在性校验
 		var count int64
 		if err := tx.Model(&entity.SysUser{}).Where("id = ?", req.UserID).Count(&count).Error; err != nil {
+			s.logger.ErrorContext(ctx, "查询用户失败", zap.Int64("user_id", req.UserID), zap.Error(err))
 			return errcode.ErrUserQuery.WithErr(err)
 		}
 		if count == 0 {
+			s.logger.WarnContext(ctx, "用户不存在", zap.Int64("user_id", req.UserID))
 			return errcode.ErrUserNotFound
 		}
 
 		// 更新操作人
 		if err := tx.Model(&entity.SysUser{}).Where("id = ?", req.UserID).
 			Update("updated_by", operatorID).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新用户操作人失败", zap.Int64("user_id", req.UserID), zap.Error(err))
 			return errcode.ErrUserUpdate.WithErr(err)
 		}
 
 		// 清空旧关联
 		if err := tx.Where("user_id = ?", req.UserID).Delete(&entity.SysUserPost{}).Error; err != nil {
+			s.logger.ErrorContext(ctx, "删除旧岗位关联失败", zap.Int64("user_id", req.UserID), zap.Error(err))
 			return errcode.ErrUserUpdate.WithErr(err)
 		}
 
@@ -385,6 +407,8 @@ func (s *service) AssignPosts(ctx context.Context, req *AssignPostsReq, operator
 				records = append(records, entity.SysUserPost{UserID: req.UserID, PostID: pid})
 			}
 			if err := tx.Create(&records).Error; err != nil {
+				s.logger.ErrorContext(ctx, "创建新岗位关联失败",
+					zap.Int64("user_id", req.UserID), zap.Int("count", len(req.PostIDs)), zap.Error(err))
 				return errcode.ErrUserUpdate.WithErr(err)
 			}
 		}

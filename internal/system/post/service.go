@@ -59,16 +59,20 @@ func (s *service) Create(ctx context.Context, req *CreateReq, operatorID int64) 
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var count int64
 		if err := tx.Model(&entity.SysPost{}).Where("name = ?", req.Name).Count(&count).Error; err != nil {
+			s.logger.ErrorContext(ctx, "查询岗位名称失败", zap.String("name", req.Name), zap.Error(err))
 			return errcode.ErrPostCreate.WithErr(err)
 		}
 		if count > 0 {
+			s.logger.WarnContext(ctx, "岗位名称已存在", zap.String("name", req.Name))
 			return errcode.ErrPostNameExists
 		}
 
 		if err := tx.Model(&entity.SysPost{}).Where("code = ?", req.Code).Count(&count).Error; err != nil {
+			s.logger.ErrorContext(ctx, "查询岗位编码失败", zap.String("code", req.Code), zap.Error(err))
 			return errcode.ErrPostCreate.WithErr(err)
 		}
 		if count > 0 {
+			s.logger.WarnContext(ctx, "岗位编码已存在", zap.String("code", req.Code))
 			return errcode.ErrPostCodeExists
 		}
 
@@ -76,6 +80,7 @@ func (s *service) Create(ctx context.Context, req *CreateReq, operatorID int64) 
 		post.CreatedBy = operatorID
 		post.UpdatedBy = operatorID
 		if err := tx.Create(post).Error; err != nil {
+			s.logger.ErrorContext(ctx, "插入岗位失败", zap.String("name", req.Name), zap.Error(err))
 			return errcode.ErrPostCreate.WithErr(err)
 		}
 		return nil
@@ -98,27 +103,35 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 		Select("id, dept_id").
 		Where("id IN ?", req.IDs).
 		Find(&posts).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询待删除岗位失败", zap.Error(err))
 		return errcode.ErrPostQuery.WithErr(err)
 	}
 
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 记录删除操作人
-		tx.Model(&entity.SysPost{}).Where("id IN ?", req.IDs).
-			Update("updated_by", operatorID)
+		if err := tx.Model(&entity.SysPost{}).Where("id IN ?", req.IDs).
+			Update("updated_by", operatorID).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新岗位操作人失败", zap.Int64("operator_id", operatorID), zap.Error(err))
+			return errcode.ErrPostDelete.WithErr(err)
+		}
 
 		var count int64
 		if err := tx.Model(&entity.SysUserPost{}).Where("post_id IN ?", req.IDs).Count(&count).Error; err != nil {
+			s.logger.ErrorContext(ctx, "查询岗位关联用户失败", zap.Error(err))
 			return errcode.ErrPostHasUsersQuery.WithErr(err)
 		}
 		if count > 0 && !req.Force {
+			s.logger.WarnContext(ctx, "岗位已分配用户", zap.Int("count", len(req.IDs)), zap.Int64("user_count", count))
 			return errcode.ErrPostHasUsers
 		}
 
 		if err := tx.Where("post_id IN ?", req.IDs).Delete(&entity.SysUserPost{}).Error; err != nil {
+			s.logger.ErrorContext(ctx, "删除岗位用户关联失败", zap.Error(err))
 			return errcode.ErrPostDeleteUsers.WithErr(err)
 		}
 
 		if err := tx.Delete(&entity.SysPost{}, req.IDs).Error; err != nil {
+			s.logger.ErrorContext(ctx, "软删除岗位失败", zap.Int("count", len(req.IDs)), zap.Error(err))
 			return errcode.ErrPostDelete.WithErr(err)
 		}
 		return nil
@@ -138,8 +151,10 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 		var existing entity.SysPost
 		if err := tx.Select("id, dept_id").First(&existing, req.ID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
+				s.logger.WarnContext(ctx, "岗位不存在", zap.Int64("id", req.ID))
 				return errcode.ErrPostNotFound
 			}
+			s.logger.ErrorContext(ctx, "查询岗位失败", zap.Int64("id", req.ID), zap.Error(err))
 			return errcode.ErrPostUpdate.WithErr(err)
 		}
 		oldDeptID = existing.DeptID
@@ -149,9 +164,11 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			if err := tx.Model(&entity.SysPost{}).
 				Where("name = ? AND id != ?", req.Name, req.ID).
 				Count(&count).Error; err != nil {
+				s.logger.ErrorContext(ctx, "查询岗位名称失败", zap.String("name", req.Name), zap.Error(err))
 				return errcode.ErrPostUpdate.WithErr(err)
 			}
 			if count > 0 {
+				s.logger.WarnContext(ctx, "岗位名称已存在", zap.String("name", req.Name))
 				return errcode.ErrPostNameExists
 			}
 		}
@@ -159,9 +176,11 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			if err := tx.Model(&entity.SysPost{}).
 				Where("code = ? AND id != ?", req.Code, req.ID).
 				Count(&count).Error; err != nil {
+				s.logger.ErrorContext(ctx, "查询岗位编码失败", zap.String("code", req.Code), zap.Error(err))
 				return errcode.ErrPostUpdate.WithErr(err)
 			}
 			if count > 0 {
+				s.logger.WarnContext(ctx, "岗位编码已存在", zap.String("code", req.Code))
 				return errcode.ErrPostCodeExists
 			}
 		}
@@ -171,6 +190,7 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 		if err := tx.Model(post).
 			Select("dept_id", "name", "code", "sort", "remark", "updated_by").
 			Updates(post).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新岗位数据失败", zap.Int64("id", req.ID), zap.Error(err))
 			return errcode.ErrPostUpdate.WithErr(err)
 		}
 		return nil
@@ -193,6 +213,7 @@ func (s *service) UpdateStatus(ctx context.Context, req *StatusReq, operatorID i
 		Select("id, dept_id").
 		Where("id IN ?", req.IDs).
 		Find(&posts).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询岗位失败", zap.Error(err))
 		return errcode.ErrPostQuery.WithErr(err)
 	}
 
@@ -204,10 +225,11 @@ func (s *service) UpdateStatus(ctx context.Context, req *StatusReq, operatorID i
 			"updated_by": operatorID,
 		})
 	if result.Error != nil {
-		s.logger.ErrorContext(ctx, "修改岗位状态失败", zap.Error(result.Error))
+		s.logger.ErrorContext(ctx, "修改岗位状态失败", zap.Int("count", len(req.IDs)), zap.Error(result.Error))
 		return errcode.ErrPostUpdate.WithErr(result.Error)
 	}
 	if result.RowsAffected == 0 {
+		s.logger.WarnContext(ctx, "岗位不存在", zap.Int64s("ids", req.IDs))
 		return errcode.ErrPostNotFound
 	}
 

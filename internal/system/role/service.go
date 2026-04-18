@@ -83,17 +83,21 @@ func (s *service) Create(ctx context.Context, req *CreateReq, operatorID int64) 
 		// 名称唯一性校验
 		var count int64
 		if err := tx.Model(&entity.SysRole{}).Where("name = ?", req.Name).Count(&count).Error; err != nil {
+			s.logger.ErrorContext(ctx, "查询角色名称失败", zap.String("name", req.Name), zap.Error(err))
 			return errcode.ErrRoleQuery.WithErr(err)
 		}
 		if count > 0 {
+			s.logger.WarnContext(ctx, "角色名称已存在", zap.String("name", req.Name))
 			return errcode.ErrRoleExists.WithMessagef("角色名称已存在: %s", req.Name)
 		}
 
 		// 编码唯一性校验
 		if err := tx.Model(&entity.SysRole{}).Where("code = ?", req.Code).Count(&count).Error; err != nil {
+			s.logger.ErrorContext(ctx, "查询角色编码失败", zap.String("code", req.Code), zap.Error(err))
 			return errcode.ErrRoleQuery.WithErr(err)
 		}
 		if count > 0 {
+			s.logger.WarnContext(ctx, "角色编码已存在", zap.String("code", req.Code))
 			return errcode.ErrRoleExists.WithMessagef("角色编码已存在: %s", req.Code)
 		}
 
@@ -104,11 +108,13 @@ func (s *service) Create(ctx context.Context, req *CreateReq, operatorID int64) 
 
 		// 计算物化路径
 		if err := computeTreePath(tx, role); err != nil {
+			s.logger.ErrorContext(ctx, "计算角色路径失败", zap.Error(err))
 			return err
 		}
 
 		// 插入角色
 		if err := tx.Create(role).Error; err != nil {
+			s.logger.ErrorContext(ctx, "插入角色失败", zap.String("name", req.Name), zap.Error(err))
 			return errcode.ErrRoleCreate.WithErr(err)
 		}
 
@@ -119,13 +125,14 @@ func (s *service) Create(ctx context.Context, req *CreateReq, operatorID int64) 
 				records = append(records, entity.SysRoleMenu{RoleID: role.ID, MenuID: mid})
 			}
 			if err := tx.Create(&records).Error; err != nil {
+				s.logger.ErrorContext(ctx, "创建角色菜单关联失败", zap.Int64("role_id", role.ID), zap.Error(err))
 				return errcode.ErrRoleCreate.WithErr(err)
 			}
 		}
 
 		return nil
 	}); err != nil {
-		s.logger.ErrorContext(ctx, "创建角色失败", zap.String("name", req.Name), zap.Error(err))
+		s.logger.ErrorContext(ctx, "创建角色事务失败", zap.String("name", req.Name), zap.Error(err))
 		return err
 	}
 
@@ -141,15 +148,18 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 	if err := s.db.WithContext(ctx).
 		Where("id IN ?", req.IDs).
 		Find(&roles).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询待删除角色失败", zap.Int("count", len(req.IDs)), zap.Error(err))
 		return errcode.ErrRoleQuery.WithErr(err)
 	}
 	if len(roles) == 0 {
+		s.logger.WarnContext(ctx, "角色不存在", zap.Int("count", len(req.IDs)))
 		return errcode.ErrRoleNotFound
 	}
 
 	// 校验内置角色
 	for _, r := range roles {
 		if r.Builtin {
+			s.logger.WarnContext(ctx, "尝试删除内置角色", zap.String("name", r.Name), zap.Int64("id", r.ID))
 			return errcode.ErrRoleBuiltin.WithMessagef("角色 [%s] 为内置角色", r.Name)
 		}
 	}
@@ -165,11 +175,13 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 		Where("parent_id IN ?", req.IDs).
 		Limit(1).
 		Find(&children).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询子角色失败", zap.Error(err))
 		return errcode.ErrRoleQuery.WithErr(err)
 	}
 	if len(children) > 0 {
 		for _, r := range roles {
 			if r.ID == children[0].ParentID {
+				s.logger.WarnContext(ctx, "角色存在子角色", zap.String("name", r.Name), zap.Int64("id", r.ID))
 				return errcode.ErrRoleHasChildren.WithMessagef("角色 [%s] 存在子角色", r.Name)
 			}
 		}
@@ -185,11 +197,13 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 		Where("role_id IN ?", req.IDs).
 		Limit(1).
 		Find(&users).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询角色关联用户失败", zap.Error(err))
 		return errcode.ErrRoleQuery.WithErr(err)
 	}
 	if len(users) > 0 {
 		for _, r := range roles {
 			if r.ID == users[0].RoleID {
+				s.logger.WarnContext(ctx, "角色已分配用户", zap.String("name", r.Name), zap.Int64("id", r.ID))
 				return errcode.ErrRoleHasUsers.WithMessagef("角色 [%s] 已分配用户", r.Name)
 			}
 		}
@@ -200,6 +214,7 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 	if err := s.db.WithContext(ctx).Model(&entity.SysUserRole{}).
 		Where("role_id IN ?", req.IDs).
 		Pluck("user_id", &userIDs).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询角色关联用户ID失败", zap.Error(err))
 		return errcode.ErrRoleQuery.WithErr(err)
 	}
 
@@ -207,9 +222,11 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&entity.SysRole{}).Where("id IN ?", req.IDs).
 			Update("updated_by", operatorID).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新角色操作人失败", zap.Int64("operator_id", operatorID), zap.Error(err))
 			return errcode.ErrRoleDelete.WithErr(err)
 		}
 		if err := tx.Delete(&entity.SysRole{}, req.IDs).Error; err != nil {
+			s.logger.ErrorContext(ctx, "软删除角色失败", zap.Int("count", len(req.IDs)), zap.Error(err))
 			return errcode.ErrRoleDelete.WithErr(err)
 		}
 		return nil
@@ -238,12 +255,15 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 		var role entity.SysRole
 		if err := tx.First(&role, req.ID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
+				s.logger.WarnContext(ctx, "角色不存在", zap.Int64("id", req.ID))
 				return errcode.ErrRoleNotFound
 			}
+			s.logger.ErrorContext(ctx, "查询角色失败", zap.Int64("id", req.ID), zap.Error(err))
 			return errcode.ErrRoleQuery.WithErr(err)
 		}
 
 		if role.Builtin {
+			s.logger.WarnContext(ctx, "尝试修改内置角色", zap.String("name", role.Name), zap.Int64("id", role.ID))
 			return errcode.ErrRoleBuiltin
 		}
 
@@ -254,9 +274,11 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			var count int64
 			if err := tx.Model(&entity.SysRole{}).
 				Where("name = ? AND id != ?", req.Name, req.ID).Count(&count).Error; err != nil {
+				s.logger.ErrorContext(ctx, "查询角色名称失败", zap.String("name", req.Name), zap.Error(err))
 				return errcode.ErrRoleQuery.WithErr(err)
 			}
 			if count > 0 {
+				s.logger.WarnContext(ctx, "角色名称已存在", zap.String("name", req.Name), zap.Int64("id", req.ID))
 				return errcode.ErrRoleExists.WithMessagef("角色名称已存在: %s", req.Name)
 			}
 			updates["name"] = req.Name
@@ -267,9 +289,11 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			var count int64
 			if err := tx.Model(&entity.SysRole{}).
 				Where("code = ? AND id != ?", req.Code, req.ID).Count(&count).Error; err != nil {
+				s.logger.ErrorContext(ctx, "查询角色编码失败", zap.String("code", req.Code), zap.Error(err))
 				return errcode.ErrRoleQuery.WithErr(err)
 			}
 			if count > 0 {
+				s.logger.WarnContext(ctx, "角色编码已存在", zap.String("code", req.Code), zap.Int64("id", req.ID))
 				return errcode.ErrRoleExists.WithMessagef("角色编码已存在: %s", req.Code)
 			}
 			updates["code"] = req.Code
@@ -281,18 +305,22 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 				var parent entity.SysRole
 				if err := tx.Select("id, tree").First(&parent, *req.ParentID).Error; err != nil {
 					if errors.Is(err, gorm.ErrRecordNotFound) {
+						s.logger.WarnContext(ctx, "父角色不存在", zap.Int64("parent_id", *req.ParentID))
 						return errcode.ErrRoleNotFound.WithMessagef("父角色不存在: %d", *req.ParentID)
 					}
+					s.logger.ErrorContext(ctx, "查询父角色失败", zap.Int64("parent_id", *req.ParentID), zap.Error(err))
 					return errcode.ErrRoleQuery.WithErr(err)
 				}
 				// 检查循环引用
 				if strings.Contains(parent.Tree, fmt.Sprintf(",%d,", req.ID)) ||
 					strings.HasSuffix(parent.Tree, fmt.Sprintf(",%d", req.ID)) {
+					s.logger.WarnContext(ctx, "检测到循环引用", zap.Int64("id", req.ID), zap.Int64("parent_id", *req.ParentID))
 					return errcode.ErrRoleUpdate.WithMessagef("不能将角色的父级设置为其子孙角色")
 				}
 			}
 			role.ParentID = req.ParentID
 			if err := computeTreePath(tx, &role); err != nil {
+				s.logger.ErrorContext(ctx, "计算角色路径失败", zap.Int64("id", req.ID), zap.Error(err))
 				return err
 			}
 			updates["parent_id"] = req.ParentID
@@ -315,11 +343,11 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 		}
 
 		if err := tx.Model(&entity.SysRole{}).Where("id = ?", req.ID).Updates(updates).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新角色失败", zap.Int64("id", req.ID), zap.Error(err))
 			return errcode.ErrRoleUpdate.WithErr(err)
 		}
 		return nil
 	}); err != nil {
-		s.logger.ErrorContext(ctx, "更新角色失败", zap.Int64("role_id", req.ID), zap.Error(err))
 		return err
 	}
 
@@ -347,11 +375,14 @@ func (s *service) UpdateStatus(ctx context.Context, req *StatusReq, operatorID i
 	var role entity.SysRole
 	if err := s.db.WithContext(ctx).Select("id, builtin").First(&role, req.ID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			s.logger.WarnContext(ctx, "角色不存在", zap.Int64("id", req.ID))
 			return errcode.ErrRoleNotFound
 		}
+		s.logger.ErrorContext(ctx, "查询角色失败", zap.Int64("id", req.ID), zap.Error(err))
 		return errcode.ErrRoleQuery.WithErr(err)
 	}
 	if role.Builtin {
+		s.logger.WarnContext(ctx, "尝试修改内置角色状态", zap.Int64("id", req.ID))
 		return errcode.ErrRoleBuiltin
 	}
 
@@ -363,10 +394,11 @@ func (s *service) UpdateStatus(ctx context.Context, req *StatusReq, operatorID i
 			"updated_by": operatorID,
 		})
 	if result.Error != nil {
-		s.logger.ErrorContext(ctx, "更新角色状态失败", zap.Int64("role_id", req.ID), zap.Error(result.Error))
+		s.logger.ErrorContext(ctx, "更新角色状态失败", zap.Int64("id", req.ID), zap.Error(result.Error))
 		return errcode.ErrRoleUpdate.WithErr(result.Error)
 	}
 	if result.RowsAffected == 0 {
+		s.logger.WarnContext(ctx, "角色不存在", zap.Int64("id", req.ID))
 		return errcode.ErrRoleNotFound
 	}
 
@@ -382,20 +414,24 @@ func (s *service) AssignMenus(ctx context.Context, req *AssignMenusReq, operator
 		// 存在性校验
 		var count int64
 		if err := tx.Model(&entity.SysRole{}).Where("id = ?", req.RoleID).Count(&count).Error; err != nil {
+			s.logger.ErrorContext(ctx, "查询角色失败", zap.Int64("role_id", req.RoleID), zap.Error(err))
 			return errcode.ErrRoleQuery.WithErr(err)
 		}
 		if count == 0 {
+			s.logger.WarnContext(ctx, "角色不存在", zap.Int64("role_id", req.RoleID))
 			return errcode.ErrRoleNotFound
 		}
 
 		// 更新操作人
 		if err := tx.Model(&entity.SysRole{}).Where("id = ?", req.RoleID).
 			Update("updated_by", operatorID).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新角色操作人失败", zap.Int64("role_id", req.RoleID), zap.Error(err))
 			return errcode.ErrRoleUpdate.WithErr(err)
 		}
 
 		// 清空旧关联
 		if err := tx.Where("role_id = ?", req.RoleID).Delete(&entity.SysRoleMenu{}).Error; err != nil {
+			s.logger.ErrorContext(ctx, "删除旧菜单关联失败", zap.Int64("role_id", req.RoleID), zap.Error(err))
 			return errcode.ErrRoleUpdate.WithErr(err)
 		}
 
@@ -406,6 +442,8 @@ func (s *service) AssignMenus(ctx context.Context, req *AssignMenusReq, operator
 				records = append(records, entity.SysRoleMenu{RoleID: req.RoleID, MenuID: mid})
 			}
 			if err := tx.Create(&records).Error; err != nil {
+				s.logger.ErrorContext(ctx, "创建新菜单关联失败",
+					zap.Int64("role_id", req.RoleID), zap.Int("count", len(req.MenuIDs)), zap.Error(err))
 				return errcode.ErrRoleUpdate.WithErr(err)
 			}
 		}
@@ -428,20 +466,24 @@ func (s *service) AssignDepts(ctx context.Context, req *AssignDeptsReq, operator
 		// 存在性校验
 		var count int64
 		if err := tx.Model(&entity.SysRole{}).Where("id = ?", req.RoleID).Count(&count).Error; err != nil {
+			s.logger.ErrorContext(ctx, "查询角色失败", zap.Int64("role_id", req.RoleID), zap.Error(err))
 			return errcode.ErrRoleQuery.WithErr(err)
 		}
 		if count == 0 {
+			s.logger.WarnContext(ctx, "角色不存在", zap.Int64("role_id", req.RoleID))
 			return errcode.ErrRoleNotFound
 		}
 
 		// 更新操作人
 		if err := tx.Model(&entity.SysRole{}).Where("id = ?", req.RoleID).
 			Update("updated_by", operatorID).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新角色操作人失败", zap.Int64("role_id", req.RoleID), zap.Error(err))
 			return errcode.ErrRoleUpdate.WithErr(err)
 		}
 
 		// 清空旧关联
 		if err := tx.Where("role_id = ?", req.RoleID).Delete(&entity.SysRoleDept{}).Error; err != nil {
+			s.logger.ErrorContext(ctx, "删除旧部门关联失败", zap.Int64("role_id", req.RoleID), zap.Error(err))
 			return errcode.ErrRoleUpdate.WithErr(err)
 		}
 
@@ -452,6 +494,8 @@ func (s *service) AssignDepts(ctx context.Context, req *AssignDeptsReq, operator
 				records = append(records, entity.SysRoleDept{RoleID: req.RoleID, DeptID: did})
 			}
 			if err := tx.Create(&records).Error; err != nil {
+				s.logger.ErrorContext(ctx, "创建新部门关联失败",
+					zap.Int64("role_id", req.RoleID), zap.Int("count", len(req.DeptIDs)), zap.Error(err))
 				return errcode.ErrRoleUpdate.WithErr(err)
 			}
 		}

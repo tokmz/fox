@@ -75,3 +75,16 @@ var (
 	ErrPostUpdate        = qierr.NewWithStatus(10310, http.StatusInternalServerError, "更新岗位失败")
 	ErrPostQuery         = qierr.NewWithStatus(10311, http.StatusInternalServerError, "查询岗位失败")
 )
+
+// ===== 菜单模块 104xx =====
+
+var (
+	ErrMenuNotFound     = qierr.NewWithStatus(10401, http.StatusNotFound, "菜单不存在")
+	ErrMenuKeyExists    = qierr.NewWithStatus(10402, http.StatusConflict, "菜单路由name已存在")
+	ErrMenuHasChildren  = qierr.NewWithStatus(10403, http.StatusForbidden, "存在子菜单，无法删除")
+	ErrMenuCircularRef  = qierr.NewWithStatus(10404, http.StatusBadRequest, "菜单循环引用")
+	ErrMenuCreate       = qierr.NewWithStatus(10405, http.StatusInternalServerError, "创建菜单失败")
+	ErrMenuUpdate       = qierr.NewWithStatus(10406, http.StatusInternalServerError, "更新菜单失败")
+	ErrMenuDelete       = qierr.NewWithStatus(10407, http.StatusInternalServerError, "删除菜单失败")
+	ErrMenuQuery        = qierr.NewWithStatus(10408, http.StatusInternalServerError, "查询菜单失败")
+)

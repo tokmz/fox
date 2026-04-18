@@ -77,9 +77,11 @@ func (s *service) Create(ctx context.Context, req *CreateReq, operatorID int64) 
 		// 编码唯一性校验
 		var count int64
 		if err := tx.Model(&entity.SysDept{}).Where("code = ?", req.Code).Count(&count).Error; err != nil {
+			s.logger.ErrorContext(ctx, "查询部门编码失败", zap.String("code", req.Code), zap.Error(err))
 			return errcode.ErrDeptQuery.WithErr(err)
 		}
 		if count > 0 {
+			s.logger.WarnContext(ctx, "部门编码已存在", zap.String("code", req.Code))
 			return errcode.ErrDeptCodeExists.WithMessagef("部门编码已存在: %s", req.Code)
 		}
 
@@ -89,10 +91,12 @@ func (s *service) Create(ctx context.Context, req *CreateReq, operatorID int64) 
 
 		// 计算物化路径
 		if err := computeTreePath(tx, dept); err != nil {
+			s.logger.ErrorContext(ctx, "计算部门路径失败", zap.String("name", req.Name), zap.Error(err))
 			return err
 		}
 
 		if err := tx.Create(dept).Error; err != nil {
+			s.logger.ErrorContext(ctx, "插入部门失败", zap.String("name", req.Name), zap.Error(err))
 			return errcode.ErrDeptCreate.WithErr(err)
 		}
 		return nil
@@ -112,9 +116,11 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 	if err := s.db.WithContext(ctx).
 		Where("id IN ?", req.IDs).
 		Find(&depts).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询待删除部门失败", zap.Error(err))
 		return errcode.ErrDeptQuery.WithErr(err)
 	}
 	if len(depts) == 0 {
+		s.logger.WarnContext(ctx, "部门不存在", zap.Int64s("ids", req.IDs))
 		return errcode.ErrDeptNotFound
 	}
 
@@ -129,12 +135,14 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 		Where("parent_id IN ?", req.IDs).
 		Limit(1).
 		Find(&children).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询子部门失败", zap.Error(err))
 		return errcode.ErrDeptQuery.WithErr(err)
 	}
 	if len(children) > 0 {
 		// 找到父部门名称
 		for _, d := range depts {
 			if d.ID == children[0].ParentID {
+				s.logger.WarnContext(ctx, "部门存在子部门", zap.Int64("id", d.ID), zap.String("name", d.Name))
 				return errcode.ErrDeptHasChildren.WithMessagef("部门 [%s] 存在子部门", d.Name)
 			}
 		}
@@ -150,11 +158,13 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 		Where("dept_id IN ?", req.IDs).
 		Limit(1).
 		Find(&users).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询部门用户失败", zap.Error(err))
 		return errcode.ErrDeptQuery.WithErr(err)
 	}
 	if len(users) > 0 {
 		for _, d := range depts {
 			if d.ID == users[0].DeptID {
+				s.logger.WarnContext(ctx, "部门存在用户", zap.Int64("id", d.ID), zap.String("name", d.Name))
 				return errcode.ErrDeptHasUsers.WithMessagef("部门 [%s] 下存在用户", d.Name)
 			}
 		}
@@ -170,11 +180,13 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 		Where("dept_id IN ?", req.IDs).
 		Limit(1).
 		Find(&posts).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询部门岗位失败", zap.Error(err))
 		return errcode.ErrDeptQuery.WithErr(err)
 	}
 	if len(posts) > 0 {
 		for _, d := range depts {
 			if d.ID == posts[0].DeptID {
+				s.logger.WarnContext(ctx, "部门存在岗位", zap.Int64("id", d.ID), zap.String("name", d.Name))
 				return errcode.ErrDeptHasPosts.WithMessagef("部门 [%s] 下存在岗位", d.Name)
 			}
 		}
@@ -185,6 +197,7 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 	if err := s.db.WithContext(ctx).Model(&entity.SysUser{}).
 		Where("dept_id IN ?", req.IDs).
 		Pluck("id", &userIDs).Error; err != nil {
+		s.logger.ErrorContext(ctx, "查询部门用户ID失败", zap.Error(err))
 		return errcode.ErrDeptQuery.WithErr(err)
 	}
 
@@ -192,9 +205,11 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&entity.SysDept{}).Where("id IN ?", req.IDs).
 			Update("updated_by", operatorID).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新部门操作人失败", zap.Int64("operator_id", operatorID), zap.Error(err))
 			return errcode.ErrDeptDelete.WithErr(err)
 		}
 		if err := tx.Delete(&entity.SysDept{}, req.IDs).Error; err != nil {
+			s.logger.ErrorContext(ctx, "软删除部门失败", zap.Int("count", len(req.IDs)), zap.Error(err))
 			return errcode.ErrDeptDelete.WithErr(err)
 		}
 		return nil
@@ -221,8 +236,10 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 		var dept entity.SysDept
 		if err := tx.First(&dept, req.ID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
+				s.logger.WarnContext(ctx, "部门不存在", zap.Int64("id", req.ID))
 				return errcode.ErrDeptNotFound
 			}
+			s.logger.ErrorContext(ctx, "查询部门失败", zap.Int64("id", req.ID), zap.Error(err))
 			return errcode.ErrDeptQuery.WithErr(err)
 		}
 
@@ -233,9 +250,11 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			var count int64
 			if err := tx.Model(&entity.SysDept{}).
 				Where("code = ? AND id != ?", req.Code, req.ID).Count(&count).Error; err != nil {
+				s.logger.ErrorContext(ctx, "查询部门编码失败", zap.String("code", req.Code), zap.Error(err))
 				return errcode.ErrDeptQuery.WithErr(err)
 			}
 			if count > 0 {
+				s.logger.WarnContext(ctx, "部门编码已存在", zap.String("code", req.Code), zap.Int64("id", req.ID))
 				return errcode.ErrDeptCodeExists.WithMessagef("部门编码已存在: %s", req.Code)
 			}
 			updates["code"] = req.Code
@@ -251,18 +270,22 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 				var parent entity.SysDept
 				if err := tx.Select("id, tree").First(&parent, *req.ParentID).Error; err != nil {
 					if errors.Is(err, gorm.ErrRecordNotFound) {
+						s.logger.WarnContext(ctx, "父部门不存在", zap.Int64("parent_id", *req.ParentID))
 						return errcode.ErrDeptNotFound.WithMessagef("父部门不存在: %d", *req.ParentID)
 					}
+					s.logger.ErrorContext(ctx, "查询父部门失败", zap.Int64("parent_id", *req.ParentID), zap.Error(err))
 					return errcode.ErrDeptQuery.WithErr(err)
 				}
 				// 检查循环引用
 				if strings.Contains(parent.Tree, fmt.Sprintf(",%d,", req.ID)) ||
 					strings.HasSuffix(parent.Tree, fmt.Sprintf(",%d", req.ID)) {
+					s.logger.WarnContext(ctx, "检测到循环引用", zap.Int64("id", req.ID), zap.Int64("parent_id", *req.ParentID))
 					return errcode.ErrDeptUpdate.WithMessagef("不能将部门的父级设置为其子孙部门")
 				}
 			}
 			dept.ParentID = req.ParentID
 			if err := computeTreePath(tx, &dept); err != nil {
+				s.logger.ErrorContext(ctx, "计算部门路径失败", zap.Int64("id", req.ID), zap.Error(err))
 				return err
 			}
 			updates["parent_id"] = req.ParentID
@@ -284,11 +307,11 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 		}
 
 		if err := tx.Model(&entity.SysDept{}).Where("id = ?", req.ID).Updates(updates).Error; err != nil {
+			s.logger.ErrorContext(ctx, "更新部门失败", zap.Int64("id", req.ID), zap.Error(err))
 			return errcode.ErrDeptUpdate.WithErr(err)
 		}
 		return nil
 	}); err != nil {
-		s.logger.ErrorContext(ctx, "更新部门失败", zap.Int64("dept_id", req.ID), zap.Error(err))
 		return err
 	}
 
@@ -311,6 +334,7 @@ func (s *service) UpdateStatus(ctx context.Context, req *StatusReq, operatorID i
 		return errcode.ErrDeptUpdate.WithErr(result.Error)
 	}
 	if result.RowsAffected == 0 {
+		s.logger.WarnContext(ctx, "部门不存在", zap.Int64s("ids", req.IDs))
 		return errcode.ErrDeptNotFound
 	}
 
