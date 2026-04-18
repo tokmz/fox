@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tokmz/fox/internal/system/entity"
+	"github.com/tokmz/fox/pkg/datascope"
 	"github.com/tokmz/fox/pkg/errcode"
 	"github.com/tokmz/qi/pkg/cache"
 	"github.com/tokmz/qi/pkg/logger"
@@ -117,37 +118,74 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 		return errcode.ErrDeptNotFound
 	}
 
-	// 逐条校验
-	for _, d := range depts {
-		// 存在子部门时拒绝删除
-		var childCount int64
-		if err := s.db.WithContext(ctx).Model(&entity.SysDept{}).
-			Where("parent_id = ?", d.ID).Count(&childCount).Error; err != nil {
-			return errcode.ErrDeptQuery.WithErr(err)
+	// 批量校验子部门
+	type DeptChild struct {
+		ParentID int64
+		Name     string
+	}
+	var children []DeptChild
+	if err := s.db.WithContext(ctx).Model(&entity.SysDept{}).
+		Select("parent_id, name").
+		Where("parent_id IN ?", req.IDs).
+		Limit(1).
+		Find(&children).Error; err != nil {
+		return errcode.ErrDeptQuery.WithErr(err)
+	}
+	if len(children) > 0 {
+		// 找到父部门名称
+		for _, d := range depts {
+			if d.ID == children[0].ParentID {
+				return errcode.ErrDeptHasChildren.WithMessagef("部门 [%s] 存在子部门", d.Name)
+			}
 		}
-		if childCount > 0 {
-			return errcode.ErrDeptHasChildren.WithMessagef("部门 [%s] 存在子部门", d.Name)
-		}
+	}
 
-		// 关联用户时拒绝删除
-		var userCount int64
-		if err := s.db.WithContext(ctx).Model(&entity.SysUser{}).
-			Where("dept_id = ?", d.ID).Count(&userCount).Error; err != nil {
-			return errcode.ErrDeptQuery.WithErr(err)
+	// 批量校验关联用户
+	type DeptUser struct {
+		DeptID int64
+	}
+	var users []DeptUser
+	if err := s.db.WithContext(ctx).Model(&entity.SysUser{}).
+		Select("dept_id").
+		Where("dept_id IN ?", req.IDs).
+		Limit(1).
+		Find(&users).Error; err != nil {
+		return errcode.ErrDeptQuery.WithErr(err)
+	}
+	if len(users) > 0 {
+		for _, d := range depts {
+			if d.ID == users[0].DeptID {
+				return errcode.ErrDeptHasUsers.WithMessagef("部门 [%s] 下存在用户", d.Name)
+			}
 		}
-		if userCount > 0 {
-			return errcode.ErrDeptHasUsers.WithMessagef("部门 [%s] 下存在用户", d.Name)
-		}
+	}
 
-		// 关联岗位时拒绝删除
-		var postCount int64
-		if err := s.db.WithContext(ctx).Model(&entity.SysPost{}).
-			Where("dept_id = ?", d.ID).Count(&postCount).Error; err != nil {
-			return errcode.ErrDeptQuery.WithErr(err)
+	// 批量校验关联岗位
+	type DeptPost struct {
+		DeptID int64
+	}
+	var posts []DeptPost
+	if err := s.db.WithContext(ctx).Model(&entity.SysPost{}).
+		Select("dept_id").
+		Where("dept_id IN ?", req.IDs).
+		Limit(1).
+		Find(&posts).Error; err != nil {
+		return errcode.ErrDeptQuery.WithErr(err)
+	}
+	if len(posts) > 0 {
+		for _, d := range depts {
+			if d.ID == posts[0].DeptID {
+				return errcode.ErrDeptHasPosts.WithMessagef("部门 [%s] 下存在岗位", d.Name)
+			}
 		}
-		if postCount > 0 {
-			return errcode.ErrDeptHasPosts.WithMessagef("部门 [%s] 下存在岗位", d.Name)
-		}
+	}
+
+	// 查询所有在这些部门下的用户ID（用于清理数据权限缓存）
+	var userIDs []int64
+	if err := s.db.WithContext(ctx).Model(&entity.SysUser{}).
+		Where("dept_id IN ?", req.IDs).
+		Pluck("id", &userIDs).Error; err != nil {
+		return errcode.ErrDeptQuery.WithErr(err)
 	}
 
 	// 同一事务内：更新操作人 → 软删除
@@ -167,6 +205,12 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 	}
 
 	s.invalidateDetailAndOptions(ctx, depts)
+
+	// 清理这些用户的数据权限缓存
+	for _, uid := range userIDs {
+		_ = datascope.ClearCache(ctx, s.cache, uid)
+	}
+
 	return nil
 }
 
@@ -182,6 +226,8 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			return errcode.ErrDeptQuery.WithErr(err)
 		}
 
+		updates := map[string]any{"updated_by": operatorID}
+
 		// 编码唯一性校验
 		if req.Code != "" {
 			var count int64
@@ -192,40 +238,52 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			if count > 0 {
 				return errcode.ErrDeptCodeExists.WithMessagef("部门编码已存在: %s", req.Code)
 			}
-			dept.Code = req.Code
+			updates["code"] = req.Code
 		}
 
 		if req.Name != "" {
-			dept.Name = req.Name
-		}
-		if req.ParentID != nil {
-			dept.ParentID = req.ParentID
-		}
-		if req.DeptType != nil {
-			dept.DeptType = *req.DeptType
-		}
-		if req.LeaderID != nil {
-			dept.LeaderID = req.LeaderID
-		}
-		if req.Sort != nil {
-			dept.Sort = *req.Sort
-		}
-		if req.Status != nil {
-			dept.Status = *req.Status
+			updates["name"] = req.Name
 		}
 
-		// 父级变更时重算物化路径
+		// 父级变更校验循环引用
 		if req.ParentID != nil {
+			if *req.ParentID != 0 {
+				var parent entity.SysDept
+				if err := tx.Select("id, tree").First(&parent, *req.ParentID).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						return errcode.ErrDeptNotFound.WithMessagef("父部门不存在: %d", *req.ParentID)
+					}
+					return errcode.ErrDeptQuery.WithErr(err)
+				}
+				// 检查循环引用
+				if strings.Contains(parent.Tree, fmt.Sprintf(",%d,", req.ID)) ||
+					strings.HasSuffix(parent.Tree, fmt.Sprintf(",%d", req.ID)) {
+					return errcode.ErrDeptUpdate.WithMessagef("不能将部门的父级设置为其子孙部门")
+				}
+			}
+			dept.ParentID = req.ParentID
 			if err := computeTreePath(tx, &dept); err != nil {
 				return err
 			}
+			updates["parent_id"] = req.ParentID
+			updates["level"] = dept.Level
+			updates["tree"] = dept.Tree
 		}
 
-		dept.UpdatedBy = operatorID
-		if err := tx.Model(&dept).
-			Select("parent_id", "name", "code", "dept_type", "leader_id",
-				"sort", "status", "level", "tree", "updated_by").
-			Updates(&dept).Error; err != nil {
+		if req.DeptType != nil {
+			updates["dept_type"] = *req.DeptType
+		}
+		if req.LeaderID != nil {
+			updates["leader_id"] = req.LeaderID
+		}
+		if req.Sort != nil {
+			updates["sort"] = *req.Sort
+		}
+		if req.Status != nil {
+			updates["status"] = *req.Status
+		}
+
+		if err := tx.Model(&entity.SysDept{}).Where("id = ?", req.ID).Updates(updates).Error; err != nil {
 			return errcode.ErrDeptUpdate.WithErr(err)
 		}
 		return nil
@@ -316,6 +374,7 @@ func (s *service) Options(ctx context.Context) ([]*OptionResp, error) {
 // List 查询部门列表并构建为树形结构
 func (s *service) List(ctx context.Context, req *ListReq) ([]*TreeResp, error) {
 	tx := s.db.WithContext(ctx).Model(&entity.SysDept{})
+	tx = tx.Scopes(datascope.Apply(ctx, "", "id", "created_by"))
 
 	if req.Name != "" {
 		tx = tx.Where("name LIKE ?", "%"+req.Name+"%")
@@ -365,7 +424,10 @@ func computeTreePath(db *gorm.DB, dept *entity.SysDept) error {
 
 	var parent entity.SysDept
 	if err := db.Select("id, level, tree").First(&parent, *dept.ParentID).Error; err != nil {
-		return fmt.Errorf("父部门不存在: %w", err)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errcode.ErrDeptNotFound.WithMessagef("父部门不存在: %d", *dept.ParentID)
+		}
+		return errcode.ErrDeptQuery.WithErr(err)
 	}
 
 	dept.Level = parent.Level + 1

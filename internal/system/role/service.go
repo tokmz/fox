@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tokmz/fox/internal/system/entity"
+	"github.com/tokmz/fox/pkg/datascope"
 	"github.com/tokmz/fox/pkg/errcode"
 	"github.com/tokmz/qi/pkg/cache"
 	"github.com/tokmz/qi/pkg/logger"
@@ -146,29 +147,60 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 		return errcode.ErrRoleNotFound
 	}
 
-	// 逐条校验
+	// 校验内置角色
 	for _, r := range roles {
 		if r.Builtin {
 			return errcode.ErrRoleBuiltin.WithMessagef("角色 [%s] 为内置角色", r.Name)
 		}
+	}
 
-		var childCount int64
-		if err := s.db.WithContext(ctx).Model(&entity.SysRole{}).
-			Where("parent_id = ?", r.ID).Count(&childCount).Error; err != nil {
-			return errcode.ErrRoleQuery.WithErr(err)
+	// 批量校验子角色
+	type RoleChild struct {
+		ParentID int64
+		Name     string
+	}
+	var children []RoleChild
+	if err := s.db.WithContext(ctx).Model(&entity.SysRole{}).
+		Select("parent_id, name").
+		Where("parent_id IN ?", req.IDs).
+		Limit(1).
+		Find(&children).Error; err != nil {
+		return errcode.ErrRoleQuery.WithErr(err)
+	}
+	if len(children) > 0 {
+		for _, r := range roles {
+			if r.ID == children[0].ParentID {
+				return errcode.ErrRoleHasChildren.WithMessagef("角色 [%s] 存在子角色", r.Name)
+			}
 		}
-		if childCount > 0 {
-			return errcode.ErrRoleHasChildren.WithMessagef("角色 [%s] 存在子角色", r.Name)
-		}
+	}
 
-		var userCount int64
-		if err := s.db.WithContext(ctx).Model(&entity.SysUserRole{}).
-			Where("role_id = ?", r.ID).Count(&userCount).Error; err != nil {
-			return errcode.ErrRoleQuery.WithErr(err)
+	// 批量校验关联用户
+	type RoleUser struct {
+		RoleID int64
+	}
+	var users []RoleUser
+	if err := s.db.WithContext(ctx).Model(&entity.SysUserRole{}).
+		Select("role_id").
+		Where("role_id IN ?", req.IDs).
+		Limit(1).
+		Find(&users).Error; err != nil {
+		return errcode.ErrRoleQuery.WithErr(err)
+	}
+	if len(users) > 0 {
+		for _, r := range roles {
+			if r.ID == users[0].RoleID {
+				return errcode.ErrRoleHasUsers.WithMessagef("角色 [%s] 已分配用户", r.Name)
+			}
 		}
-		if userCount > 0 {
-			return errcode.ErrRoleHasUsers.WithMessagef("角色 [%s] 已分配用户", r.Name)
-		}
+	}
+
+	// 查询所有使用这些角色的用户ID（用于清理数据权限缓存）
+	var userIDs []int64
+	if err := s.db.WithContext(ctx).Model(&entity.SysUserRole{}).
+		Where("role_id IN ?", req.IDs).
+		Pluck("user_id", &userIDs).Error; err != nil {
+		return errcode.ErrRoleQuery.WithErr(err)
 	}
 
 	// 同一事务内：更新操作人 → 软删除
@@ -188,12 +220,20 @@ func (s *service) Delete(ctx context.Context, req *DeleteReq, operatorID int64) 
 	}
 
 	s.invalidateDetailAndOptions(ctx, roles)
+
+	// 清理使用这些角色的用户的数据权限缓存
+	for _, uid := range userIDs {
+		_ = datascope.ClearCache(ctx, s.cache, uid)
+	}
+
 	return nil
 }
 
 // Update 更新角色
 // 加载 → 校验 → 修改字段 → 父级变更时重算物化路径 → 写入
 func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) error {
+	var dataScopeChanged bool
+
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var role entity.SysRole
 		if err := tx.First(&role, req.ID).Error; err != nil {
@@ -207,6 +247,8 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			return errcode.ErrRoleBuiltin
 		}
 
+		updates := map[string]any{"updated_by": operatorID}
+
 		// 名称唯一性校验
 		if req.Name != "" {
 			var count int64
@@ -217,7 +259,7 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			if count > 0 {
 				return errcode.ErrRoleExists.WithMessagef("角色名称已存在: %s", req.Name)
 			}
-			role.Name = req.Name
+			updates["name"] = req.Name
 		}
 
 		// 编码唯一性校验
@@ -230,38 +272,49 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 			if count > 0 {
 				return errcode.ErrRoleExists.WithMessagef("角色编码已存在: %s", req.Code)
 			}
-			role.Code = req.Code
+			updates["code"] = req.Code
 		}
 
-		// 可选字段
+		// 父级变更校验循环引用
 		if req.ParentID != nil {
+			if *req.ParentID != 0 {
+				var parent entity.SysRole
+				if err := tx.Select("id, tree").First(&parent, *req.ParentID).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						return errcode.ErrRoleNotFound.WithMessagef("父角色不存在: %d", *req.ParentID)
+					}
+					return errcode.ErrRoleQuery.WithErr(err)
+				}
+				// 检查循环引用
+				if strings.Contains(parent.Tree, fmt.Sprintf(",%d,", req.ID)) ||
+					strings.HasSuffix(parent.Tree, fmt.Sprintf(",%d", req.ID)) {
+					return errcode.ErrRoleUpdate.WithMessagef("不能将角色的父级设置为其子孙角色")
+				}
+			}
 			role.ParentID = req.ParentID
-		}
-		if req.DataScope != nil {
-			role.DataScope = *req.DataScope
-		}
-		if req.DeptCheckStrictly != nil {
-			role.DeptCheckStrictly = *req.DeptCheckStrictly
-		}
-		if req.Sort != nil {
-			role.Sort = *req.Sort
-		}
-		if req.Status != nil {
-			role.Status = *req.Status
-		}
-
-		// 父级变更时重算物化路径
-		if req.ParentID != nil {
 			if err := computeTreePath(tx, &role); err != nil {
 				return err
 			}
+			updates["parent_id"] = req.ParentID
+			updates["level"] = role.Level
+			updates["tree"] = role.Tree
 		}
 
-		role.UpdatedBy = operatorID
-		if err := tx.Model(&role).
-			Select("parent_id", "name", "code", "data_scope", "dept_check_strictly",
-				"sort", "status", "level", "tree", "updated_by").
-			Updates(&role).Error; err != nil {
+		if req.DataScope != nil {
+			dataScopeChanged = *req.DataScope != role.DataScope
+			updates["data_scope"] = *req.DataScope
+		}
+		if req.DeptCheckStrictly != nil {
+			updates["dept_check_strictly"] = *req.DeptCheckStrictly
+		}
+		if req.Sort != nil {
+			updates["sort"] = *req.Sort
+		}
+		if req.Status != nil {
+			updates["status"] = *req.Status
+		}
+
+		if err := tx.Model(&entity.SysRole{}).Where("id = ?", req.ID).Updates(updates).Error; err != nil {
 			return errcode.ErrRoleUpdate.WithErr(err)
 		}
 		return nil
@@ -272,6 +325,19 @@ func (s *service) Update(ctx context.Context, req *UpdateReq, operatorID int64) 
 
 	_ = s.cache.Del(ctx, fmt.Sprintf(roleDetailKey, req.ID))
 	_ = s.cache.Del(ctx, roleOptionsKey)
+
+	// DataScope 变更时清理使用该角色的用户数据权限缓存
+	if dataScopeChanged {
+		var userIDs []int64
+		if err := s.db.WithContext(ctx).Model(&entity.SysUserRole{}).
+			Where("role_id = ?", req.ID).
+			Pluck("user_id", &userIDs).Error; err == nil {
+			for _, uid := range userIDs {
+				_ = datascope.ClearCache(ctx, s.cache, uid)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -330,7 +396,7 @@ func (s *service) AssignMenus(ctx context.Context, req *AssignMenusReq, operator
 
 		// 清空旧关联
 		if err := tx.Where("role_id = ?", req.RoleID).Delete(&entity.SysRoleMenu{}).Error; err != nil {
-			return errcode.ErrRoleMenuQuery.WithErr(err)
+			return errcode.ErrRoleUpdate.WithErr(err)
 		}
 
 		// 写入新关联
@@ -340,7 +406,7 @@ func (s *service) AssignMenus(ctx context.Context, req *AssignMenusReq, operator
 				records = append(records, entity.SysRoleMenu{RoleID: req.RoleID, MenuID: mid})
 			}
 			if err := tx.Create(&records).Error; err != nil {
-				return errcode.ErrRoleMenuQuery.WithErr(err)
+				return errcode.ErrRoleUpdate.WithErr(err)
 			}
 		}
 
@@ -376,7 +442,7 @@ func (s *service) AssignDepts(ctx context.Context, req *AssignDeptsReq, operator
 
 		// 清空旧关联
 		if err := tx.Where("role_id = ?", req.RoleID).Delete(&entity.SysRoleDept{}).Error; err != nil {
-			return errcode.ErrRoleDeptQuery.WithErr(err)
+			return errcode.ErrRoleUpdate.WithErr(err)
 		}
 
 		// 写入新关联
@@ -386,7 +452,7 @@ func (s *service) AssignDepts(ctx context.Context, req *AssignDeptsReq, operator
 				records = append(records, entity.SysRoleDept{RoleID: req.RoleID, DeptID: did})
 			}
 			if err := tx.Create(&records).Error; err != nil {
-				return errcode.ErrRoleDeptQuery.WithErr(err)
+				return errcode.ErrRoleUpdate.WithErr(err)
 			}
 		}
 
@@ -398,6 +464,17 @@ func (s *service) AssignDepts(ctx context.Context, req *AssignDeptsReq, operator
 	}
 
 	_ = s.cache.Del(ctx, fmt.Sprintf(roleDetailKey, req.RoleID))
+
+	// 清理使用该角色的用户的数据权限缓存
+	var userIDs []int64
+	if err := s.db.WithContext(ctx).Model(&entity.SysUserRole{}).
+		Where("role_id = ?", req.RoleID).
+		Pluck("user_id", &userIDs).Error; err == nil {
+		for _, uid := range userIDs {
+			_ = datascope.ClearCache(ctx, s.cache, uid)
+		}
+	}
+
 	return nil
 }
 
@@ -411,25 +488,34 @@ func (s *service) Detail(ctx context.Context, req *DetailReq) (*DetailResp, erro
 	var resp DetailResp
 	if err := s.cache.GetOrSet(ctx, key, &resp, roleDetailTTL, func() (any, error) {
 		var role entity.SysRole
-		if err := s.db.WithContext(ctx).First(&role, req.ID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, cache.ErrNotFound
+		var menuIDs, deptIDs []int64
+
+		// 使用事务保证数据一致性
+		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.First(&role, req.ID).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return cache.ErrNotFound
+				}
+				return errcode.ErrRoleQuery.WithErr(err)
 			}
-			return nil, errcode.ErrRoleQuery.WithErr(err)
-		}
 
-		var menuIDs []int64
-		if err := s.db.WithContext(ctx).Model(&entity.SysRoleMenu{}).
-			Where("role_id = ?", req.ID).
-			Pluck("menu_id", &menuIDs).Error; err != nil {
-			return nil, errcode.ErrRoleMenuQuery.WithErr(err)
-		}
+			if err := tx.Model(&entity.SysRoleMenu{}).
+				Where("role_id = ?", req.ID).
+				Pluck("menu_id", &menuIDs).Error; err != nil {
+				return errcode.ErrRoleQuery.WithErr(err)
+			}
 
-		var deptIDs []int64
-		if err := s.db.WithContext(ctx).Model(&entity.SysRoleDept{}).
-			Where("role_id = ?", req.ID).
-			Pluck("dept_id", &deptIDs).Error; err != nil {
-			return nil, errcode.ErrRoleDeptQuery.WithErr(err)
+			if err := tx.Model(&entity.SysRoleDept{}).
+				Where("role_id = ?", req.ID).
+				Pluck("dept_id", &deptIDs).Error; err != nil {
+				return errcode.ErrRoleQuery.WithErr(err)
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			return nil, err
 		}
 
 		return entityToDetailResp(&role, menuIDs, deptIDs), nil
@@ -472,6 +558,7 @@ func (s *service) Options(ctx context.Context) ([]*OptionResp, error) {
 // 支持按名称/编码模糊搜索、状态精确过滤
 func (s *service) List(ctx context.Context, req *ListReq) ([]*TreeResp, error) {
 	tx := s.db.WithContext(ctx).Model(&entity.SysRole{})
+	tx = tx.Scopes(datascope.Apply(ctx, "", "id", "created_by"))
 
 	if req.Name != "" {
 		tx = tx.Where("name LIKE ?", "%"+req.Name+"%")
@@ -519,7 +606,10 @@ func computeTreePath(db *gorm.DB, role *entity.SysRole) error {
 
 	var parent entity.SysRole
 	if err := db.Select("id, level, tree").First(&parent, *role.ParentID).Error; err != nil {
-		return fmt.Errorf("父角色不存在: %w", err)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errcode.ErrRoleNotFound.WithMessagef("父角色不存在: %d", *role.ParentID)
+		}
+		return errcode.ErrRoleQuery.WithErr(err)
 	}
 
 	role.Level = parent.Level + 1

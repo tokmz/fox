@@ -17,6 +17,19 @@ import (
 //   配置模块 106xx
 //   认证模块 107xx
 
+// ===== 用户模块 100xx =====
+
+var (
+	ErrUserNotFound   = qierr.NewWithStatus(10001, http.StatusNotFound, "用户不存在")
+	ErrUserExists     = qierr.NewWithStatus(10002, http.StatusConflict, "用户已存在")
+	ErrUserCreate     = qierr.NewWithStatus(10003, http.StatusInternalServerError, "创建用户失败")
+	ErrUserUpdate     = qierr.NewWithStatus(10004, http.StatusInternalServerError, "更新用户失败")
+	ErrUserDelete     = qierr.NewWithStatus(10005, http.StatusInternalServerError, "删除用户失败")
+	ErrUserQuery      = qierr.NewWithStatus(10006, http.StatusInternalServerError, "查询用户失败")
+	ErrUserRoleQuery  = qierr.NewWithStatus(10007, http.StatusInternalServerError, "查询用户角色失败")
+	ErrUserPostQuery  = qierr.NewWithStatus(10008, http.StatusInternalServerError, "查询用户岗位失败")
+)
+
 // ===== 角色模块 101xx =====
 
 var (
